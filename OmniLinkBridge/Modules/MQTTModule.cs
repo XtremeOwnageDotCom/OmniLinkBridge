@@ -30,6 +30,7 @@ namespace OmniLinkBridge.Modules
         private IManagedMqttClient MqttClient { get; set; }
         private bool ControllerConnected { get; set; }
         private MessageProcessor MessageProcessor { get; set; }
+        private MQTTLogger loggingModule { get; set; }
 
         private readonly AutoResetEvent trigger = new AutoResetEvent(false);
 
@@ -64,6 +65,9 @@ namespace OmniLinkBridge.Modules
 
             MqttClientOptionsBuilder options = new MqttClientOptionsBuilder()
                 .WithTcpServer(Global.mqtt_server)
+                .WithCleanSession(true)
+                .WithKeepAlivePeriod(TimeSpan.FromMinutes(5))
+                .WithCommunicationTimeout(TimeSpan.FromSeconds(30))
                 .WithWillMessage(lastwill);
 
             if (!string.IsNullOrEmpty(Global.mqtt_username))
@@ -75,7 +79,8 @@ namespace OmniLinkBridge.Modules
                 .WithClientOptions(options.Build())
                 .Build();
 
-            MqttClient = new MqttFactory().CreateManagedMqttClient();
+            loggingModule = new MQTTLogger();
+            MqttClient = new MqttFactory().CreateManagedMqttClient(loggingModule);
             MqttClient.ConnectedHandler = new MqttClientConnectedHandlerDelegate((e) =>
             {
                 log.Debug("Connected");
@@ -95,7 +100,7 @@ namespace OmniLinkBridge.Modules
                     PublishConfig();
             });
             MqttClient.ConnectingFailedHandler = new ConnectingFailedHandlerDelegate((e) => log.Error("Error connecting {reason}", e.Exception.Message));
-            MqttClient.DisconnectedHandler = new MqttClientDisconnectedHandlerDelegate((e) => log.Debug("Disconnected"));
+            MqttClient.DisconnectedHandler = new MqttClientDisconnectedHandlerDelegate((e) => log.Debug($"MQTT Disconnected. Reason: {e.Reason}. Exception: {e.Exception?.Message ?? ""}"));
 
             MqttClient.StartAsync(manoptions);
 
@@ -136,7 +141,7 @@ namespace OmniLinkBridge.Modules
 
         private void OmniLink_OnConnect(object sender, EventArgs e)
         {
-            if(MqttClient.IsConnected)
+            if (MqttClient.IsConnected)
                 PublishConfig();
 
             ControllerConnected = true;
@@ -274,7 +279,7 @@ namespace OmniLinkBridge.Modules
                 }
 
                 if (zone.DefaultProperties == true || Global.mqtt_discovery_ignore_zones.Contains(zone.Number))
-                {                  
+                {
                     PublishAsync($"{Global.mqtt_discovery_prefix}/binary_sensor/{Global.mqtt_prefix}/zone{i}/config", null);
                     PublishAsync($"{Global.mqtt_discovery_prefix}/sensor/{Global.mqtt_prefix}/zone{i}/config", null);
                     PublishAsync($"{Global.mqtt_discovery_prefix}/sensor/{Global.mqtt_prefix}/zone{i}temp/config", null);
@@ -311,7 +316,7 @@ namespace OmniLinkBridge.Modules
                 else
                 {
                     PublishUnitState(unit);
-                    PublishAsync(unit.ToTopic(Topic.name), unit.Name);  
+                    PublishAsync(unit.ToTopic(Topic.name), unit.Name);
                 }
 
                 if (unit.DefaultProperties == true || Global.mqtt_discovery_ignore_units.Contains(unit.Number))
@@ -484,7 +489,7 @@ namespace OmniLinkBridge.Modules
             if (!MqttClient.IsConnected)
                 return;
 
-            if(e.Type == SystemEventType.Phone)
+            if (e.Type == SystemEventType.Phone)
                 PublishAsync(SystemTroubleTopic("phone"), e.Trouble ? "trouble" : "secure");
             else if (e.Type == SystemEventType.AC)
                 PublishAsync(SystemTroubleTopic("ac"), e.Trouble ? "trouble" : "secure");
@@ -506,7 +511,7 @@ namespace OmniLinkBridge.Modules
             PublishAsync(zone.ToTopic(Topic.state), zone.ToState());
             PublishAsync(zone.ToTopic(Topic.basic_state), zone.ToBasicState());
 
-            if(zone.IsTemperatureZone())
+            if (zone.IsTemperatureZone())
                 PublishAsync(zone.ToTopic(Topic.current_temperature), zone.TempText());
             else if (zone.IsHumidityZone())
                 PublishAsync(zone.ToTopic(Topic.current_humidity), zone.TempText());
@@ -552,7 +557,10 @@ namespace OmniLinkBridge.Modules
 
         private Task PublishAsync(string topic, string payload)
         {
-            return MqttClient.PublishAsync(topic, payload, MqttQualityOfServiceLevel.AtMostOnce, true);
+            var task = MqttClient.PublishAsync(topic, payload, MqttQualityOfServiceLevel.AtMostOnce, true);
+
+            task.Wait();
+            return task;
         }
     }
 }
